@@ -210,67 +210,52 @@ def parse_biab(path):
     endTick = Fraction(int(measures * bbDivision * 4 * timesigZ(style)),
                        timesigN(style))
 
-    notes = []
-
     mid = mido.MidiFile()
     track = mido.MidiTrack()
-    mid.tracks.append(track)
+    track.append(mido.MetaMessage('set_tempo', tempo=int((60/bpm * 1e6) * timesigZ(style))))
+    events = []
 
     if eventCount == 0:
         print("No events found")
     else:
-        idx = eventStart
-        lastDelta = 0
-        print(f"Events found at {eventStart}")
-        for i in range(eventCount):
-            msg = mido.parse(xs[idx+4:idx+8])
-            type = getint(xs[idx + 4]) & 0xf0
-            if type == 0x90:
-                # 0x90 is note on
-                channel = getint(xs[idx + 7])
-                tick = (getint(xs[idx])
-                        + (getint(xs[idx + 1]) << 8)
-                        + (getint(xs[idx + 2]) << 16)
-                        + (getint(xs[idx + 3]) << 24))
-                # tick -= 4 * bbDivision
-                msg = mido.Message(type='note_on',
-                                   channel=channel,
-                                   note=getint(xs[idx + 5]),
-                                   velocity=getint(xs[idx + 6]))
+        # BIAB has a strange event format which is *almost* standard MIDI but not quite
+        # The format is <tick><msg><duration> == 12 bytes
+        # ticks are in absolute ticks per beat, durations are in relative ticks per beat
 
-                deltaTime = (getint(xs[idx + 8])
+        # we build a list of msgs with absolute times first, then organise them in the next step
+        idx = eventStart
+        print(f"Events found at {eventStart}")
+        while idx < (eventCount * 8):
+            msg = mido.parse(xs[idx+4:idx+8].tobytes())
+            tick = (getint(xs[idx])
+                    + (getint(xs[idx + 1]) << 8)
+                    + (getint(xs[idx + 2]) << 16)
+                    + (getint(xs[idx + 3]) << 24))
+            duration = (getint(xs[idx + 8])
                         + (getint(xs[idx + 9]) << 8)
                         + (getint(xs[idx + 10]) << 16)
                         + (getint(xs[idx + 11]) << 24))
-
-                if deltaTime == 0:
-                    if lastDelta == 0:
-                        print(f"note event of length 0 at {idx}")
-                        continue
-                    deltaTime = lastDelta
-
-                lastDelta = deltaTime
-
-                noteOff = mido.Message(type='note_off',
-                                       channel=channel,
-                                       note=getint(xs[idx + 5]),
-                                       velocity=getint(xs[idx + 6]),
-                                       time=int(mido.tick2second(tick + deltaTime, 120, mido.bpm2tempo(bpm))))
-                track.append(msg)
-                track.append(noteOff)
-
-            elif type == 0xb0 or type == 0xc0:
-                # ignore control
-                pass
-            elif type == 0:
-                break
-            else:
-                print(f"Unknown event type {str(xs[idx + 4])}")
-                break
-
+            if msg and not msg.is_realtime:
+                events.append(msg.copy(time=tick))
+                if msg.type == 'note_on':
+                    events.append(mido.Message(type='note_off',
+                                              channel=msg.channel,
+                                              velocity=msg.velocity,
+                                              note=msg.note,
+                                              time=tick+duration))
+            lastTick = tick
             idx += 12
 
 
+    events.sort(key=lambda m: m.time)
+    sorted_messages = [m for m in events if m]
+    prevTime = 0
+    for m in sorted_messages:
+        newTime = abs(prevTime - m.time)
+        track.append(m.copy(time=newTime))
+        prevTime = m.time
+
+    mid.tracks.append(track)
     mid.save('road_song.mid')
 
     print(title)
